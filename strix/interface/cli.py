@@ -15,8 +15,20 @@ from .utils import get_severity_color
 
 
 async def run_cli(args: Any) -> None:  # noqa: PLR0915
+    """
+    Entry point for running the Strix Cybersecurity Agent via CLI.
+
+    This function:
+    - Displays startup information.
+    - Configures tracer and signal handlers.
+    - Initializes and executes the StrixAgent.
+    - Handles vulnerability reports and final output display.
+    """
     console = Console()
 
+    # ─────────────────────────────
+    # 🦉 Startup Display
+    # ─────────────────────────────
     start_text = Text()
     start_text.append("🦉 ", style="bold white")
     start_text.append("STRIX CYBERSECURITY AGENT", style="bold green")
@@ -41,18 +53,15 @@ async def run_cli(args: Any) -> None:  # noqa: PLR0915
     note_text = Text()
     note_text.append("\n\n", style="dim")
     note_text.append("⏱️  ", style="dim")
-    note_text.append("This may take a while depending on target complexity. ", style="dim")
-    note_text.append("Vulnerabilities will be displayed in real-time.", style="dim")
+    note_text.append(
+        "This may take a while depending on target complexity. ", style="dim"
+    )
+    note_text.append(
+        "Vulnerabilities will be displayed in real-time.", style="dim"
+    )
 
     startup_panel = Panel(
-        Text.assemble(
-            start_text,
-            "\n\n",
-            target_text,
-            "\n",
-            results_text,
-            note_text,
-        ),
+        Text.assemble(start_text, "\n\n", target_text, "\n", results_text, note_text),
         title="[bold green]🛡️  STRIX PENETRATION TEST INITIATED",
         title_align="center",
         border_style="green",
@@ -63,6 +72,9 @@ async def run_cli(args: Any) -> None:  # noqa: PLR0915
     console.print(startup_panel)
     console.print()
 
+    # ─────────────────────────────
+    # ⚙️ Configuration
+    # ─────────────────────────────
     scan_config = {
         "scan_id": args.run_name,
         "targets": args.targets_info,
@@ -83,7 +95,13 @@ async def run_cli(args: Any) -> None:  # noqa: PLR0915
     tracer = Tracer(args.run_name)
     tracer.set_scan_config(scan_config)
 
-    def display_vulnerability(report_id: str, title: str, content: str, severity: str) -> None:
+    # ─────────────────────────────
+    # 🐞 Vulnerability Display
+    # ─────────────────────────────
+    def display_vulnerability(
+        report_id: str, title: str, content: str, severity: str
+    ) -> None:
+        """Display vulnerability findings in a formatted panel."""
         severity_color = get_severity_color(severity.lower())
 
         vuln_text = Text()
@@ -97,13 +115,7 @@ async def run_cli(args: Any) -> None:  # noqa: PLR0915
         severity_text.append(severity.upper(), style=f"bold {severity_color}")
 
         vuln_panel = Panel(
-            Text.assemble(
-                vuln_text,
-                "\n\n",
-                severity_text,
-                "\n\n",
-                content,
-            ),
+            Text.assemble(vuln_text, "\n\n", severity_text, "\n\n", content),
             title=f"[bold red]🔍 {report_id.upper()}",
             title_align="left",
             border_style="red",
@@ -115,10 +127,15 @@ async def run_cli(args: Any) -> None:  # noqa: PLR0915
 
     tracer.vulnerability_found_callback = display_vulnerability
 
+    # ─────────────────────────────
+    # 🧹 Cleanup and Signal Handling
+    # ─────────────────────────────
     def cleanup_on_exit() -> None:
+        """Ensure tracer cleanup on exit."""
         tracer.cleanup()
 
     def signal_handler(_signum: int, _frame: Any) -> None:
+        """Handle system signals for graceful shutdown."""
         tracer.cleanup()
         sys.exit(1)
 
@@ -130,9 +147,14 @@ async def run_cli(args: Any) -> None:  # noqa: PLR0915
 
     set_global_tracer(tracer)
 
+    # ─────────────────────────────
+    # 🚀 Agent Execution
+    # ─────────────────────────────
     try:
         console.print()
-        with console.status("[bold cyan]Running penetration test...", spinner="dots") as status:
+        with console.status(
+            "[bold cyan]Running penetration test...", spinner="dots"
+        ) as status:
             agent = StrixAgent(agent_config)
             result = await agent.execute_scan(scan_config)
             status.stop()
@@ -148,6 +170,9 @@ async def run_cli(args: Any) -> None:  # noqa: PLR0915
         console.print(f"[bold red]Error during penetration test:[/] {e}")
         raise
 
+    # ─────────────────────────────
+    # 📊 Final Report
+    # ─────────────────────────────
     if tracer.final_scan_result:
         console.print()
 
@@ -156,11 +181,7 @@ async def run_cli(args: Any) -> None:  # noqa: PLR0915
         final_report_text.append("FINAL PENETRATION TEST REPORT", style="bold cyan")
 
         final_report_panel = Panel(
-            Text.assemble(
-                final_report_text,
-                "\n\n",
-                tracer.final_scan_result,
-            ),
+            Text.assemble(final_report_text, "\n\n", tracer.final_scan_result),
             title="[bold cyan]📊 PENETRATION TEST SUMMARY",
             title_align="center",
             border_style="cyan",
