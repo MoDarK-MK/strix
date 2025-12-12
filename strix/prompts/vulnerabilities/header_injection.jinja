@@ -1,0 +1,238 @@
+<header_injection_vulnerability_guide>
+<title>HTTP HEADER INJECTION</title>
+
+<critical>Header injection enables response splitting, cache poisoning, session fixation, authentication bypass, and distributed attacks across proxies and caches. Treat every server-controlled header value as untrusted input until normalized and validated. User influence on response headers is as dangerous as code injection.</critical>
+
+<scope>
+- Response header injection (Set-Cookie, Location, Content-Type, X-* custom headers)
+- Request header manipulation (Host, X-Forwarded-*, User-Agent, Referer, Accept-Language, Authorization)
+- Proxy/cache confusion via multiple header techniques
+- CRLF injection enabling response splitting and smuggling
+- HTTP/2 pseudo-header attacks
+- Header parsing differentials across servers, proxies, and clients
+- Log poisoning and security bypass via log-based detection evasion
+</scope>
+
+<methodology>
+1. Inventory all server-controlled headers influenced by user input: redirects, cookies, content-type, content-disposition, custom X-* headers, error messages, rate-limit headers.
+2. Test normalization: attempt newline injection (\n, \r, %0a, %0d, %0d%0a, URL-encoded variants, Unicode whitespace), null bytes, multi-byte sequences.
+3. Establish a baseline response with a known payload; compare status, headers, body, caching directives, and intermediary behavior.
+4. Probe parser differentials: same payload via different transports (HTTP/1.0, HTTP/1.1, HTTP/2, chunked encoding), case variance, leading/trailing whitespace.
+5. Test multi-stage injection: injection site in query string vs body vs header, with secondary reflection into another header.
+</methodology>
+
+<discovery_techniques>
+<injection_surfaces>
+- Redirect endpoints (next, return, continue, goto, url, redirect_uri, referer echo)
+- User-visible errors and custom error pages (user input echoed in HTTP 404/500 responses)
+- File download endpoints (Content-Disposition filename, Content-Type inference from user input)
+- API response headers (X-Page-Count, X-Total-Results, X-Query-Time derived from user input)
+- Cache headers (Cache-Control, ETag, Last-Modified computed from user-supplied values)
+- Authentication/session headers (Set-Cookie with user-derived domain, path, or value; WWW-Authenticate realm)
+- Custom logging or tracking headers (X-Request-Id containing user input, X-Correlation-Id, X-User-Id)
+- Webhook/callback URLs (Host, Referer, User-Agent in requests made by server)
+- Rate-limit or quota headers (X-RateLimit-Remaining, X-RateLimit-Reset influenced by user)
+- Proxy headers (X-Forwarded-For, X-Forwarded-Proto, X-Real-IP intended for trusted proxies but injectable)
+</injection_surfaces>
+
+<newline_and_crlf_variants>
+- Bare LF: %0a, 0x0a, \n
+- Bare CR: %0d, 0x0d, \r
+- CRLF: %0d%0a, %0a%0d, 0x0d0x0a, \r\n, \n\r
+- Double encoding: %250d%250a, %252f%252e%252e
+- Overlong UTF-8: %c0%8d%c0%8a (Cyrillic/overlong representations of control chars)
+- Unicode line/paragraph separators: %e2%80%a8 (U+2028), %e2%80%a9 (U+2029)
+- Mixed case: %0D%0A, %0a%0d
+- Null termination: %00, trailing NUL coercing parser stop
+- Mixed separators: %0a%0d%0a (LF CR LF), multiple separators to confuse parsers
+</newline_and_crlf_variants>
+
+<parser_differentials>
+- HTTP/1.0 vs HTTP/1.1: message framing rules differ (presence of Content-Length vs Transfer-Encoding)
+- Chunked transfer encoding: chunk delimiters followed by injected headers
+- Multipart boundaries: CRLF after boundary resets parser state in some implementations
+- HTTP/2 pseudo-header injection (:method, :path, :authority, :scheme) via header values
+- Header field parsing: tolerance for leading/trailing whitespace, case insensitivity, multiple values
+- Method override: X-HTTP-Method-Override, X-Method-Override respected by some frameworks
+- Host header handling: Host vs X-Forwarded-Host precedence; port inclusion; IPv6 format confusion
+- Server-side template evaluation of headers: header value processed through template engine
+</parser_differentials>
+
+<normalization_bypass>
+- Multiple Content-Length headers: server vs proxy pick different one, leading to request smuggling
+- Whitespace encoding: header-name: %20value vs header-name:%20value vs header-name : value
+- Folding: RFC 2822 header folding (continuation lines) in HTTP context: deprecated but parsed differently across servers
+- Tab injection: %09, often treated as whitespace or field separator, permitting header injections
+- Null byte truncation: header-value\x00injected-header causes null termination in some parsers
+- Case mangling: Header-Name vs header-name vs HEADER-NAME; cache key differs
+- Leading dot or colon: .header-name, :header-name parsed inconsistently
+</normalization_bypass>
+
+<fingerprinting_and_detection>
+- Vary headers: inspect Vary, Via, X-Cache, X-Powered-By to infer caching layer and server
+- Server response headers: Server, X-AspNet-Version, X-Served-By, CF-Ray (Cloudflare), X-Amzn-RequestId (AWS)
+- Error pages: custom 404/500 with server version or tech stack hints
+- Timing: response time deltas revealing caching behavior or backend processing
+- Response length: same request → different lengths suggesting header injection serialized
+- ETag changes: injected headers in response change cache key/ETag calculation
+</fingerprinting_and_detection>
+</discovery_techniques>
+
+<detection_channels>
+<direct_header_injection>
+- Injected header appears in response (Set-Cookie, Location, X-Custom, etc.)
+- Secondary request receives injected value (cookie set, redirect followed, etc.)
+</direct_header_injection>
+
+<response_splitting>
+- Inject CRLF + empty line + attacker content; response parser treats attacker content as new response
+- Observable via proxy/cache: two requests yield two responses, or cache returns injected response to unrelated request
+</response_splitting>
+
+<cache_poisoning>
+- Inject cache-busting payload: manipulate Vary, Cache-Control, ETag; secondary request from different user hits poisoned cache
+- Observe via timing: first request slow, second request fast (cache hit with injected content)
+- Test across proxy boundaries: Burp, mitmproxy, or real CDN caching injected payload
+</cache_poisoning>
+
+<cookie_and_session_fixation>
+- Set-Cookie injection: inject Domain, Path, Secure, HttpOnly, SameSite, Max-Age attributes
+- Session identifier hijacking: inject SameSite=None + Secure to enable cross-site cookie theft
+- Observe: browser sends injected cookie on subsequent same-origin requests; cross-site requests if SameSite=None
+</cookie_and_session_fixation>
+
+<host_header_confusion>
+- Host header injection: modify Host header or inject via user input reflected into response Host header
+- Observe: password reset emails sent to attacker.com, CDN maps to attacker origin, OAuth redirects to attacker
+- Compare responses: same path with different Host headers yields different content or redirects
+</host_header_confusion>
+
+<authentication_bypass>
+- Authorization header manipulation: inject bearer tokens, Basic auth, API keys into request or response
+- Observe: unauthorized request succeeds after header injection; elevated privileges; different user accessed
+</authentication_bypass>
+
+<timing_and_side_channel>
+- Response time deltas reveal header processing: injected header with computation (regex, database lookup) vs simple header
+- Retry-After header with large delay causing client-side pause
+- Set-Cookie with future expiry vs past expiry affecting session state timing
+</timing_and_side_channel>
+
+<oast>
+- Blind XXE/SSRF via injected Referer/User-Agent in webhook/logging sent to attacker server
+- Open Redirect via Location header injection; client follows attacker-controlled URL
+- DNS exfiltration via data encoded in Host/X-Forwarded-Host header parsed by logging/proxy infrastructure
+</oast>
+</detection_channels>
+
+<exploitation_techniques>
+<response_splitting_and_smuggling>
+- Inject CRLF to terminate current response and begin new response under attacker control
+- Payload: {% raw %}injectionpoint\r\n\r\n<script>alert('xss')</script>{% endraw %}
+- Proxy/cache sees two responses; if cache key includes only first line, poisoned cache returns attacker response
+- HTTP/2 servers may reject CRLF in header values (stricter parsing), but some intermediaries or backends accept
+- Request smuggling via header injection: inject Content-Length header conflicting with Transfer-Encoding; proxy and backend parse differently
+</response_splitting_and_smuggling>
+
+<cache_poisoning_vectors>
+- Vary header manipulation: Vary: Accept-Encoding injected → cache segregates by encoding not content
+- X-Forwarded-* injection: X-Forwarded-Proto: https injected into HTTPS request; if cache key includes, HTTP requests hit HTTPS cache
+- Age/Max-Age injection: set to 0 for cache bypass, or huge value for persistent poisoning
+- Cache-Control: public injected into private responses, or private injected into public → cache behavior flip
+- Etag collision: inject ETag matching another resource → conditional requests return wrong resource
+- Set-Cookie for cache key: if cache includes cookies, inject Set-Cookie → cache entries segregate by attacker-chosen value
+</cache_poisoning_vectors>
+
+<session_and_cookie_attacks>
+- Domain/Path bypass: inject Domain=.attacker.com or Path=/ to widen cookie scope
+- HttpOnly bypass: if Set-Cookie lacks HttpOnly, injected cookie accessible to JavaScript
+- SameSite bypass: inject SameSite=None; Secure flag required but if HTTPS, enables cross-site cookie inclusion
+- Secure flag bypass: inject Secure to force cookie over HTTPS only; if site has mixed HTTP/HTTPS, cookie inaccessible on HTTP
+- Max-Age manipulation: inject Max-Age=-1 to immediately expire all cookies, or Max-Age=999999999 for persistent cookie
+- Cookie jar collision: inject cookie with same name/domain/path as legitimate cookie → precedence determines which is sent
+</session_and_cookie_attacks>
+
+<redirect_and_authentication_injection>
+- Location header injection: Redirect endpoint echoes user input into Location header; inject CRLF + new Location pointing to attacker
+- Authorization header reflection: endpoints reflecting Authorization header in error responses; inject Authorization header via user input
+- WWW-Authenticate header injection: inject custom realm or parameter; client-side password managers may store injected credentials
+- Refresh header injection: inject Refresh: 0; url=attacker.com for JavaScript-free redirect
+- X-Accel-Redirect header injection (Nginx): inject X-Accel-Redirect: /etc/passwd to serve internal files (if not properly validated)
+</redirect_and_authentication_injection>
+
+<proxy_and_gateway_confusion>
+- X-Forwarded-For spoofing: inject X-Forwarded-For: 127.0.0.1 to bypass IP-based rate limiting or auth
+- X-Forwarded-Proto injection: inject X-Forwarded-Proto: https to SSL-only validation even on HTTP connection
+- X-Forwarded-Host injection: inject Host header or X-Forwarded-Host to cause password reset/OAuth tokens sent to attacker domain
+- X-Real-IP injection: Nginx/Apache reverse proxy trusts X-Real-IP; inject attacker IP for logging bypass
+- Forwarded header injection (RFC 7239): similar to X-Forwarded-*, but standardized; inject attacker IP/host
+- Client-IP / CF-Connecting-IP injection: CloudFlare and others trust these headers; inject attacker IP
+</proxy_and_gateway_confusion>
+
+<content_type_and_encoding_manipulation>
+- Content-Type injection: inject Content-Type: text/html into response served as application/json; browser sniffs and renders HTML → XSS
+- Content-Encoding injection: inject Content-Encoding: gzip without actual gzip compression; browser fails to decompress, revealing raw content
+- X-Content-Type-Options bypass: inject X-Content-Type-Options: nosniff into response; if server respects, then inject Content-Type for sniffing
+- Charset injection: inject Content-Type: text/html; charset=utf-7; UTF-7 decoding may enable XSS via alternative encoding
+- Content-Disposition abuse: inject Content-Disposition: inline for script execution, or attachment with executable extension
+</content_type_and_encoding_manipulation>
+
+<xss_and_header_injection>
+- Location header XSS: inject Location: javascript:alert(1) or data:text/html,<script>alert(1)</script>
+- Set-Cookie with embedded script (if cookie processed as HTML): Set-Cookie: xss=<script>alert(1)</script>
+- X-Original-URL reflection: some apps reflect X-Original-URL in headers; inject XSS payload
+- Referer header echo: if Referer echoed in error page via header, inject Referer: "><script>alert(1)</script>
+- User-Agent or other request headers echoed into response headers or body → CRLF inject for splitting
+</xss_and_header_injection>
+
+<log_poisoning_and_waf_bypass>
+- Inject request headers that appear in access logs; attacker reads logs and runs commands
+- Inject CRLF + fake log entries to obfuscate attack in logs
+- Inject headers to defeat WAF: split payload across multiple headers, mix encodings, use header case variants
+- X-Client-IP, X-Forwarded-For injection to spoof source IP in firewall logs
+- User-Agent injection: inject malicious User-Agent to poison honeypot logs or SIEM correlation
+</log_poisoning_and_waf_bypass>
+
+<open_redirect_via_headers>
+- Location header: inject Location: https://attacker.com directly if header user-controlled
+- Refresh header: inject Refresh: 0; url=attacker.com
+- Content-Location header (less common but still processed): inject Content-Location: https://attacker.com
+- Link header with rel=next or rel=shortlink to attacker
+- From header (uncommon) in specific protocols
+</open_redirect_via_headers>
+
+<dns_and_timing_attacks>
+- Host header as DNS oracle: inject Host: attacker.tld; if logging or proxying includes Host resolution, DNS exfiltration possible
+- X-Forwarded-Host DNS: similar to Host, if proxied service resolves header value
+- Timing via Retry-After: server honors Retry-After header; inject large delay to affect client behavior
+- Connection header abuse: inject Connection: close to close connection prematurely, or Connection: keep-alive to affect pipelining
+</dns_and_timing_attacks>
+
+<http2_specific>
+- Pseudo-header injection: :method, :path, :authority, :scheme are pseudo-headers in HTTP/2; some implementations allow injection via header values
+- Header name normalization: HTTP/2 lowercases header names; inject using uppercase to bypass case-sensitive filters in HTTP/1.1 downgrade
+- Continuation frame splitting: HEADERS frames with CONTINUATION frames; inject across frame boundaries
+</http2_specific>
+
+<parser_confusion_chains>
+- Proxy → backend mismatch: HTTP/1.1 proxy to HTTP/2 backend (or vice versa); same payload parsed as different requests
+- Chunked vs Content-Length confusion: proxy sees chunked, backend sees Content-Length; request body interpretation differs
+- Forwarded vs X-Forwarded-* precedence: if both present, different servers prioritize different one; inject via less-trusted header
+- Case sensitivity in header names: some systems case-insensitive, others not; inject via case variant to evade filters
+</parser_confusion_chains>
+</exploitation_techniques>
+
+<high_value_targets>
+- Password reset and account recovery flows (Set-Cookie, Location, email headers)
+- OAuth/SSO redirect endpoints (Location, Host header determines authorization server destination)
+- Rate limiting and quota systems (X-RateLimit-* headers injected to bypass limits)
+- API authentication (Authorization header, X-API-Key manipulation)
+- Payment gateways and financial transactions (Location redirects, Set-Cookie for session fixation)
+- Admin panels and internal tools (Host header confusion, X-Forwarded-* bypasses)
+- CDN and WAF bypass (cache poisoning, header smuggling to evade detection)
+- Multi-tenant isolation (Host header, X-Tenant-Id injection to cross tenant boundaries)
+- Logging and monitoring bypass (X-Forwarded-For spoofing, User-Agent poisoning)
+- Email systems (Injecting headers into notification/alert emails sent by server)
+</high_value_targets>
+
+</header_injection_vulnerability_guide>
